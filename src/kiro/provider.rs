@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::{CallContext, MultiTokenManager};
+use crate::kiro::token_manager::{AcquiredContext, CallContext, MultiTokenManager};
 
 /// 每个凭据的最大重试次数
 const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
@@ -165,19 +165,23 @@ impl KiroProvider {
         let mut last_error: Option<anyhow::Error> = None;
 
         for attempt in 0..max_retries {
-            // 获取调用上下文（绑定 index、credentials、token）
-            let ctx = match self.token_manager.acquire_context().await {
-                Ok(c) => c,
+            // 获取调用上下文（绑定 id、credentials、token 和连接守卫）
+            let acquired = match self.token_manager.acquire_context().await {
+                Ok(a) => a,
                 Err(e) => {
                     last_error = Some(e);
                     continue;
                 }
             };
 
+            let AcquiredContext { ctx, guard } = acquired;
+            let id = ctx.id;
+
             let url = self.base_url();
             let headers = match self.build_headers(&ctx) {
                 Ok(h) => h,
                 Err(e) => {
+                    // guard 在这里 drop，活跃连接数 -1
                     last_error = Some(e);
                     continue;
                 }
@@ -200,8 +204,9 @@ impl KiroProvider {
                         max_retries,
                         e
                     );
-                    // 网络错误，报告失败并重试（使用绑定的 id）
-                    if !self.token_manager.report_failure(ctx.id) {
+                    // 网络错误，报告失败并重试
+                    // guard 在这里 drop，活跃连接数 -1
+                    if !self.token_manager.report_failure(id) {
                         return Err(e.into());
                     }
                     last_error = Some(e.into());
@@ -213,11 +218,20 @@ impl KiroProvider {
 
             // 成功响应
             if status.is_success() {
-                self.token_manager.report_success(ctx.id);
+                self.token_manager.report_success(id);
+                // 保持 guard 存活：将其移入闭包，随 Response 一起返回
+                // 当 Response 被完全消费并 drop 时，guard 也会 drop
+                let guard = std::sync::Arc::new(guard);
+                let guard_clone = guard.clone();
+                // 使用 Response 的 extensions 来存储 guard
+                let mut response = response;
+                response.extensions_mut().insert(guard_clone);
+                // 原始 guard 在这里 drop，但 Arc 引用计数 > 0，不会真正释放
                 return Ok(response);
             }
 
             // 400 Bad Request - 不算凭据错误，直接返回
+            // guard 在 bail! 时 drop，活跃连接数 -1
             if status.as_u16() == 400 {
                 let body = response.text().await.unwrap_or_default();
                 let api_type = if is_stream { "流式" } else { "非流式" };
@@ -225,6 +239,7 @@ impl KiroProvider {
             }
 
             // 429 Too Many Requests - 限流错误，不算凭据错误，重试但不禁用凭据
+            // guard 在 continue 时 drop，活跃连接数 -1
             if status.as_u16() == 429 {
                 let body = response.text().await.unwrap_or_default();
                 tracing::warn!(
@@ -243,7 +258,8 @@ impl KiroProvider {
                 continue;
             }
 
-            // 其他错误 - 记录失败并可能重试（使用绑定的 id）
+            // 其他错误 - 记录失败并可能重试
+            // guard 在 continue 或 bail! 时 drop，活跃连接数 -1
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(
                 "API 请求失败（尝试 {}/{}）: {} {}",
@@ -253,7 +269,7 @@ impl KiroProvider {
                 body
             );
 
-            let has_available = self.token_manager.report_failure(ctx.id);
+            let has_available = self.token_manager.report_failure(id);
             if !has_available {
                 let api_type = if is_stream { "流式" } else { "非流式" };
                 anyhow::bail!(

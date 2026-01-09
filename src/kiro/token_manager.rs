@@ -10,6 +10,8 @@ use serde::Serialize;
 use tokio::sync::Mutex as TokioMutex;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::machine_id;
@@ -373,6 +375,8 @@ struct CredentialEntry {
     failure_count: u32,
     /// 是否已禁用
     disabled: bool,
+    /// 当前活跃连接数（Least-Connections 负载均衡）
+    active_connections: Arc<AtomicUsize>,
 }
 
 // ============================================================================
@@ -449,6 +453,31 @@ pub struct CallContext {
     pub token: String,
 }
 
+/// RAII 连接守卫
+///
+/// 用于追踪凭据的活跃连接数，实现 Least-Connections 负载均衡
+/// 当 Guard 被 Drop 时，自动递减对应凭据的活跃连接数
+pub struct ConnectionGuard {
+    id: u64,
+    active_connections: Arc<AtomicUsize>,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.active_connections.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// 获取上下文的返回值
+///
+/// 包含调用上下文和连接守卫，Guard 的生命周期决定了连接计数的生命周期
+pub struct AcquiredContext {
+    /// 调用上下文
+    pub ctx: CallContext,
+    /// 连接守卫（持有期间计入活跃连接数）
+    pub guard: ConnectionGuard,
+}
+
 impl MultiTokenManager {
     /// 创建多凭据 Token 管理器
     ///
@@ -485,6 +514,7 @@ impl MultiTokenManager {
                     credentials: cred,
                     failure_count: 0,
                     disabled: false,
+                    active_connections: Arc::new(AtomicUsize::new(0)),
                 }
             })
             .collect();
@@ -558,67 +588,83 @@ impl MultiTokenManager {
 
     /// 获取 API 调用上下文
     ///
-    /// 返回绑定了 id、credentials 和 token 的调用上下文
+    /// 返回绑定了 id、credentials、token 和连接守卫的调用上下文
     /// 确保整个 API 调用过程中使用一致的凭据信息
+    ///
+    /// 选择策略：Least-Connections（优先级 > 活跃连接数 > ID）
+    /// - 优先选择优先级高（数值小）的凭据
+    /// - 同优先级下选择活跃连接数最少的凭据
+    /// - 连接数相同时选择 ID 较小的凭据（稳定排序）
     ///
     /// 如果 Token 过期或即将过期，会自动刷新
     /// Token 刷新失败时会尝试下一个可用凭据（不计入失败次数）
-    pub async fn acquire_context(&self) -> anyhow::Result<CallContext> {
-        let total = self.total_count();
-        let mut tried_count = 0;
+    pub async fn acquire_context(&self) -> anyhow::Result<AcquiredContext> {
+        let mut tried_ids = std::collections::HashSet::<u64>::new();
 
         loop {
-            if tried_count >= total {
-                anyhow::bail!(
-                    "所有凭据均无法获取有效 Token（可用: {}/{}）",
-                    self.available_count(),
-                    total
-                );
-            }
-
-            let (id, credentials) = {
+            let (id, credentials, guard) = {
                 let entries = self.entries.lock();
-                let current_id = *self.current_id.lock();
+                let total = entries.len();
+                let available = entries.iter().filter(|e| !e.disabled).count();
 
-                // 找到当前凭据
-                if let Some(entry) = entries.iter().find(|e| e.id == current_id && !e.disabled) {
-                    (entry.id, entry.credentials.clone())
-                } else {
-                    // 当前凭据不可用，选择优先级最高的可用凭据
-                    if let Some(entry) = entries
-                        .iter()
-                        .filter(|e| !e.disabled)
-                        .min_by_key(|e| e.credentials.priority)
-                    {
-                        // 先提取数据
-                        let new_id = entry.id;
-                        let new_creds = entry.credentials.clone();
-                        drop(entries);
-                        // 更新 current_id
-                        let mut current_id = self.current_id.lock();
-                        *current_id = new_id;
-                        (new_id, new_creds)
-                    } else {
-                        // 注意：必须在 bail! 之前计算 available_count，
-                        // 因为 available_count() 会尝试获取 entries 锁，
-                        // 而此时我们已经持有该锁，会导致死锁
-                        let available = entries.iter().filter(|e| !e.disabled).count();
-                        anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
-                    }
+                if available == 0 {
+                    anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
                 }
+
+                // Least-Connections 选择：优先级 > 活跃连接数 > ID
+                let entry = entries
+                    .iter()
+                    .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
+                    .min_by_key(|e| {
+                        (
+                            e.credentials.priority,
+                            e.active_connections.load(Ordering::Acquire),
+                            e.id,
+                        )
+                    });
+
+                let entry = match entry {
+                    Some(e) => e,
+                    None => {
+                        anyhow::bail!(
+                            "所有凭据均无法获取有效 Token（可用: {}/{}）",
+                            available,
+                            total
+                        );
+                    }
+                };
+
+                let id = entry.id;
+                let credentials = entry.credentials.clone();
+
+                // 递增活跃连接数
+                let counter = Arc::clone(&entry.active_connections);
+                counter.fetch_add(1, Ordering::AcqRel);
+
+                let guard = ConnectionGuard {
+                    id,
+                    active_connections: counter,
+                };
+
+                (id, credentials, guard)
             };
+
+            // 更新 current_id（记录最近分配的凭据）
+            {
+                let mut current_id = self.current_id.lock();
+                *current_id = id;
+            }
 
             // 尝试获取/刷新 Token
             match self.try_ensure_token(id, &credentials).await {
                 Ok(ctx) => {
-                    return Ok(ctx);
+                    return Ok(AcquiredContext { ctx, guard });
                 }
                 Err(e) => {
                     tracing::warn!("凭据 #{} Token 刷新失败，尝试下一个凭据: {}", id, e);
-
-                    // Token 刷新失败，切换到下一个优先级的凭据（不计入失败次数）
-                    self.switch_to_next_by_priority();
-                    tried_count += 1;
+                    // guard 在这里 drop，活跃连接数 -1
+                    drop(guard);
+                    tried_ids.insert(id);
                 }
             }
         }
@@ -881,7 +927,7 @@ impl MultiTokenManager {
 
     /// 获取使用额度信息
     pub async fn get_usage_limits(&self) -> anyhow::Result<UsageLimitsResponse> {
-        let ctx = self.acquire_context().await?;
+        let AcquiredContext { ctx, guard: _guard } = self.acquire_context().await?;
         get_usage_limits(
             &ctx.credentials,
             &self.config,
@@ -1113,6 +1159,7 @@ impl MultiTokenManager {
                 credentials: validated_cred,
                 failure_count: 0,
                 disabled: false,
+                active_connections: Arc::new(AtomicUsize::new(0)),
             });
         }
 
