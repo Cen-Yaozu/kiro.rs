@@ -84,6 +84,14 @@ impl AdminService {
             .map_err(|e| self.classify_error(e, id))
     }
 
+    /// 强制刷新指定凭据的 Token
+    pub async fn refresh_token(&self, id: u64) -> Result<(), AdminServiceError> {
+        self.token_manager
+            .force_refresh_token(id)
+            .await
+            .map_err(|e| self.classify_balance_error(e, id))
+    }
+
     /// 获取凭据余额
     pub async fn get_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
         let usage = self

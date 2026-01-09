@@ -9,4 +9,15 @@
 /admin-ui/node_modules/
 /admin-ui/dist/
 /admin-ui/pnpm-lock.yaml
+/admin-ui/package-lock.json
 /admin-ui/tsconfig.tsbuildinfo
+
+# 敏感配置备份
+/configs_backup_*/
+/docker-config/
+
+# Docker
+/docker-compose.yml
+
+# Claude
+/.claude/

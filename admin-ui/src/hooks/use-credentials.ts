@@ -4,6 +4,7 @@ import {
   setCredentialDisabled,
   setCredentialPriority,
   resetCredentialFailure,
+  refreshCredentialToken,
   getCredentialBalance,
   addCredential,
 } from '@/api/credentials'
@@ -57,6 +58,17 @@ export function useResetFailure() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (id: number) => resetCredentialFailure(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 强制刷新 Token
+export function useRefreshToken() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => refreshCredentialToken(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

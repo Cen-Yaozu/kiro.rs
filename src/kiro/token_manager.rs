@@ -975,6 +975,40 @@ impl MultiTokenManager {
         Ok(())
     }
 
+    /// 强制刷新指定凭据的 Token（Admin API）
+    ///
+    /// 无论 Token 是否过期，都会强制刷新
+    pub async fn force_refresh_token(&self, id: u64) -> anyhow::Result<()> {
+        let credentials = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.credentials.clone())
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+        };
+
+        // 获取刷新锁
+        let _guard = self.refresh_lock.lock().await;
+
+        // 强制刷新 Token
+        let new_creds = refresh_token(&credentials, &self.config, self.proxy.as_ref()).await?;
+
+        // 更新凭据
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.credentials = new_creds;
+                // 刷新成功，重置失败计数
+                entry.failure_count = 0;
+            }
+        }
+
+        // 持久化更改
+        self.persist_credentials()?;
+        Ok(())
+    }
+
     /// 获取指定凭据的使用额度（Admin API）
     pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
         let credentials = {
