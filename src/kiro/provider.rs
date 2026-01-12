@@ -7,12 +7,16 @@
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, CONNECTION, CONTENT_TYPE, HOST, HeaderMap, HeaderValue};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::machine_id;
-use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::{AcquiredContext, CallContext, MultiTokenManager};
+
+#[cfg(test)]
+use crate::kiro::model::credentials::KiroCredentials;
 
 /// 每个凭据的最大重试次数
 const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
@@ -123,7 +127,9 @@ impl KiroProvider {
     ///
     /// 支持多凭据故障转移：
     /// - 400 Bad Request: 直接返回错误，不计入凭据失败
-    /// - 其他错误: 计入失败次数，达到阈值后切换凭据重试
+    /// - 401/403: 视为凭据/权限问题，计入失败次数并允许故障转移
+    /// - 402 MONTHLY_REQUEST_COUNT: 视为额度用尽，禁用凭据并切换
+    /// - 429/5xx/网络等瞬态错误: 重试但不禁用或切换凭据（避免误把所有凭据锁死）
     ///
     /// # Arguments
     /// * `request_body` - JSON 格式的请求体字符串
@@ -138,7 +144,9 @@ impl KiroProvider {
     ///
     /// 支持多凭据故障转移：
     /// - 400 Bad Request: 直接返回错误，不计入凭据失败
-    /// - 其他错误: 计入失败次数，达到阈值后切换凭据重试
+    /// - 401/403: 视为凭据/权限问题，计入失败次数并允许故障转移
+    /// - 402 MONTHLY_REQUEST_COUNT: 视为额度用尽，禁用凭据并切换
+    /// - 429/5xx/网络等瞬态错误: 重试但不禁用或切换凭据（避免误把所有凭据锁死）
     ///
     /// # Arguments
     /// * `request_body` - JSON 格式的请求体字符串
@@ -163,6 +171,7 @@ impl KiroProvider {
         let total_credentials = self.token_manager.total_count();
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
+        let api_type = if is_stream { "流式" } else { "非流式" };
 
         for attempt in 0..max_retries {
             // 获取调用上下文（绑定 id、credentials、token 和连接守卫）
@@ -204,12 +213,13 @@ impl KiroProvider {
                         max_retries,
                         e
                     );
-                    // 网络错误，报告失败并重试
+                    // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
+                    // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
                     // guard 在这里 drop，活跃连接数 -1
-                    if !self.token_manager.report_failure(id) {
-                        return Err(e.into());
-                    }
                     last_error = Some(e.into());
+                    if attempt + 1 < max_retries {
+                        sleep(Self::retry_delay(attempt)).await;
+                    }
                     continue;
                 }
             };
@@ -230,66 +240,100 @@ impl KiroProvider {
                 return Ok(response);
             }
 
-            // 400 Bad Request - 不算凭据错误，直接返回
-            // guard 在 bail! 时 drop，活跃连接数 -1
-            if status.as_u16() == 400 {
-                let body = response.text().await.unwrap_or_default();
-                let api_type = if is_stream { "流式" } else { "非流式" };
-                anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
-            }
+            // 失败响应：读取 body 用于日志/错误信息
+            // guard 会在各分支的 continue/bail! 时 drop，活跃连接数 -1
+            let body = response.text().await.unwrap_or_default();
 
-            // 429 Too Many Requests - 限流错误，不算凭据错误，重试但不禁用凭据
-            // guard 在 continue 时 drop，活跃连接数 -1
-            if status.as_u16() == 429 {
-                let body = response.text().await.unwrap_or_default();
+            // 402 Payment Required 且额度用尽：禁用凭据并故障转移
+            if status.as_u16() == 402 && Self::is_monthly_request_limit(&body) {
                 tracing::warn!(
-                    "API 请求被限流（尝试 {}/{}）: {} {}",
+                    "API 请求失败（额度已用尽，禁用凭据并切换，尝试 {}/{}）: {} {}",
                     attempt + 1,
                     max_retries,
                     status,
                     body
                 );
-                last_error = Some(anyhow::anyhow!(
-                    "{} API 请求被限流: {} {}",
-                    if is_stream { "流式" } else { "非流式" },
-                    status,
-                    body
-                ));
+
+                let has_available = self.token_manager.report_quota_exhausted(id);
+                if !has_available {
+                    anyhow::bail!(
+                        "{} API 请求失败（所有凭据已用尽）: {} {}",
+                        api_type,
+                        status,
+                        body
+                    );
+                }
+
+                last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
                 continue;
             }
 
-            // 其他错误 - 记录失败并可能重试
-            // guard 在 continue 或 bail! 时 drop，活跃连接数 -1
-            let body = response.text().await.unwrap_or_default();
+            // 400 Bad Request - 请求问题，重试/切换凭据无意义
+            if status.as_u16() == 400 {
+                anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
+            }
+
+            // 401/403 - 更可能是凭据/权限问题：计入失败并允许故障转移
+            if matches!(status.as_u16(), 401 | 403) {
+                tracing::warn!(
+                    "API 请求失败（可能为凭据错误，尝试 {}/{}）: {} {}",
+                    attempt + 1,
+                    max_retries,
+                    status,
+                    body
+                );
+
+                let has_available = self.token_manager.report_failure(id);
+                if !has_available {
+                    anyhow::bail!(
+                        "{} API 请求失败（所有凭据已用尽）: {} {}",
+                        api_type,
+                        status,
+                        body
+                    );
+                }
+
+                last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
+                continue;
+            }
+
+            // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
+            // （避免 429 high traffic / 502 high load 等瞬态错误把所有凭据锁死）
+            if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+                tracing::warn!(
+                    "API 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
+                    attempt + 1,
+                    max_retries,
+                    status,
+                    body
+                );
+                last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
+                if attempt + 1 < max_retries {
+                    sleep(Self::retry_delay(attempt)).await;
+                }
+                continue;
+            }
+
+            // 其他 4xx - 通常为请求/配置问题：直接返回，不计入凭据失败
+            if status.is_client_error() {
+                anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
+            }
+
+            // 兜底：当作可重试的瞬态错误处理（不切换凭据）
             tracing::warn!(
-                "API 请求失败（尝试 {}/{}）: {} {}",
+                "API 请求失败（未知错误，尝试 {}/{}）: {} {}",
                 attempt + 1,
                 max_retries,
                 status,
                 body
             );
-
-            let has_available = self.token_manager.report_failure(id);
-            if !has_available {
-                let api_type = if is_stream { "流式" } else { "非流式" };
-                anyhow::bail!(
-                    "{} API 请求失败（所有凭据已用尽）: {} {}",
-                    api_type,
-                    status,
-                    body
-                );
+            last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
+            if attempt + 1 < max_retries {
+                sleep(Self::retry_delay(attempt)).await;
             }
-
-            last_error = Some(anyhow::anyhow!(
-                "{} API 请求失败: {} {}",
-                if is_stream { "流式" } else { "非流式" },
-                status,
-                body
-            ));
         }
 
         // 所有重试都失败
-        let api_type = if is_stream { "流式" } else { "非流式" };
         Err(last_error.unwrap_or_else(|| {
             anyhow::anyhow!(
                 "{} API 请求失败：已达到最大重试次数（{}次）",
@@ -297,6 +341,40 @@ impl KiroProvider {
                 max_retries
             )
         }))
+    }
+
+    fn retry_delay(attempt: usize) -> Duration {
+        // 指数退避 + 少量抖动，避免上游抖动时放大故障
+        const BASE_MS: u64 = 200;
+        const MAX_MS: u64 = 2_000;
+        let exp = BASE_MS.saturating_mul(2u64.saturating_pow(attempt.min(6) as u32));
+        let backoff = exp.min(MAX_MS);
+        let jitter_max = (backoff / 4).max(1);
+        let jitter = fastrand::u64(0..=jitter_max);
+        Duration::from_millis(backoff.saturating_add(jitter))
+    }
+
+    fn is_monthly_request_limit(body: &str) -> bool {
+        if body.contains("MONTHLY_REQUEST_COUNT") {
+            return true;
+        }
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+            return false;
+        };
+
+        if value
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v == "MONTHLY_REQUEST_COUNT")
+        {
+            return true;
+        }
+
+        value
+            .pointer("/error/reason")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v == "MONTHLY_REQUEST_COUNT")
     }
 }
 
@@ -359,5 +437,23 @@ mod tests {
                 .starts_with("Bearer ")
         );
         assert_eq!(headers.get(CONNECTION).unwrap(), "close");
+    }
+
+    #[test]
+    fn test_is_monthly_request_limit_detects_reason() {
+        let body = r#"{"message":"You have reached the limit.","reason":"MONTHLY_REQUEST_COUNT"}"#;
+        assert!(KiroProvider::is_monthly_request_limit(body));
+    }
+
+    #[test]
+    fn test_is_monthly_request_limit_nested_reason() {
+        let body = r#"{"error":{"reason":"MONTHLY_REQUEST_COUNT"}}"#;
+        assert!(KiroProvider::is_monthly_request_limit(body));
+    }
+
+    #[test]
+    fn test_is_monthly_request_limit_false() {
+        let body = r#"{"message":"nope","reason":"DAILY_REQUEST_COUNT"}"#;
+        assert!(!KiroProvider::is_monthly_request_limit(body));
     }
 }
