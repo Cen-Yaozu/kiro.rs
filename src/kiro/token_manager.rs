@@ -1276,6 +1276,18 @@ impl MultiTokenManager {
         Ok(new_id)
     }
 
+    /// 获取指定凭据的 refresh_token 指纹（前 64 字符）
+    ///
+    /// 用于批量导入时的重复检测，避免存储完整 token
+    pub fn get_refresh_token_fingerprint(&self, id: u64) -> Option<String> {
+        let entries = self.entries.lock();
+        entries
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.credentials.refresh_token.as_ref())
+            .map(|token| token.chars().take(64).collect())
+    }
+
     /// 删除凭据（Admin API）
     ///
     /// # 前置条件

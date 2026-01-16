@@ -92,6 +92,72 @@ fn default_auth_method() -> String {
     "social".to_string()
 }
 
+/// 批量导入凭据请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchImportRequest {
+    /// Token 列表（支持换行分隔的字符串或数组）
+    #[serde(deserialize_with = "deserialize_tokens")]
+    pub tokens: Vec<String>,
+
+    /// 认证方式（可选，默认 social）
+    #[serde(default = "default_auth_method")]
+    pub auth_method: String,
+
+    /// 是否跳过无效 token 继续导入（默认 true）
+    #[serde(default = "default_skip_invalid")]
+    pub skip_invalid: bool,
+}
+
+fn default_skip_invalid() -> bool {
+    true
+}
+
+fn deserialize_tokens<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct TokensVisitor;
+
+    impl<'de> Visitor<'de> for TokensVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string with newline-separated tokens or an array of tokens")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value.lines().map(|s| s.to_string()).collect())
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value.lines().map(|s| s.to_string()).collect())
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut tokens = Vec::new();
+            while let Some(token) = seq.next_element::<String>()? {
+                tokens.push(token);
+            }
+            Ok(tokens)
+        }
+    }
+
+    deserializer.deserialize_any(TokensVisitor)
+}
+
 /// 添加凭据成功响应
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,6 +166,40 @@ pub struct AddCredentialResponse {
     pub message: String,
     /// 新添加的凭据 ID
     pub credential_id: u64,
+}
+
+/// 批量导入结果项
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchImportResultItem {
+    /// 行号（从 1 开始）
+    pub line: usize,
+    /// 导入状态
+    pub status: String,
+    /// 成功时返回凭据 ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<u64>,
+    /// 失败时返回错误信息
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// 批量导入响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchImportResponse {
+    pub success: bool,
+    pub message: String,
+    /// 总 token 数量
+    pub total: usize,
+    /// 成功导入数量
+    pub imported: usize,
+    /// 失败数量
+    pub failed: usize,
+    /// 跳过数量（空行、标题行等）
+    pub skipped: usize,
+    /// 各 token 导入结果
+    pub results: Vec<BatchImportResultItem>,
 }
 
 // ============ 余额查询 ============
