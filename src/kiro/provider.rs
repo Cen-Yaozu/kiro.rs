@@ -249,7 +249,7 @@ impl KiroProvider {
             };
 
             let url = self.mcp_url();
-            let headers = match self.build_mcp_headers(&ctx) {
+            let headers = match self.build_mcp_headers(&ctx.ctx) {
                 Ok(h) => h,
                 Err(e) => {
                     last_error = Some(e);
@@ -286,7 +286,7 @@ impl KiroProvider {
 
             // 成功响应
             if status.is_success() {
-                self.token_manager.report_success(ctx.id);
+                self.token_manager.report_success(ctx.ctx.id);
                 return Ok(response);
             }
 
@@ -295,7 +295,7 @@ impl KiroProvider {
 
             // 402 额度用尽
             if status.as_u16() == 402 && Self::is_monthly_request_limit(&body) {
-                let has_available = self.token_manager.report_quota_exhausted(ctx.id);
+                let has_available = self.token_manager.report_quota_exhausted(ctx.ctx.id);
                 if !has_available {
                     anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
                 }
@@ -310,7 +310,7 @@ impl KiroProvider {
 
             // 401/403 凭据问题
             if matches!(status.as_u16(), 401 | 403) {
-                let has_available = self.token_manager.report_failure(ctx.id);
+                let has_available = self.token_manager.report_failure(ctx.ctx.id);
                 if !has_available {
                     anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
                 }
