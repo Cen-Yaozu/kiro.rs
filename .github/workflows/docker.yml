@@ -57,6 +57,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           push: true
+          provenance: false
           tags: |
             ${{ env.DOCKER_IMAGE }}:${{ steps.version.outputs.tag }}-${{ matrix.arch }}
             ${{ env.DOCKER_IMAGE }}:latest-${{ matrix.arch }}
