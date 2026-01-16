@@ -190,6 +190,19 @@ pub async fn post_messages(
     }
 }
 
+/// 根据上游错误信息判断应返回的状态码
+fn determine_error_status(error_msg: &str) -> (StatusCode, &'static str) {
+    if error_msg.contains("400 Bad Request") {
+        (StatusCode::BAD_REQUEST, "invalid_request_error")
+    } else if error_msg.contains("429") {
+        (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error")
+    } else if error_msg.contains("401") || error_msg.contains("403") {
+        (StatusCode::UNAUTHORIZED, "authentication_error")
+    } else {
+        (StatusCode::BAD_GATEWAY, "api_error")
+    }
+}
+
 /// 处理流式请求
 async fn handle_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
@@ -202,12 +215,14 @@ async fn handle_stream_request(
     let response = match provider.call_api_stream(request_body).await {
         Ok(resp) => resp,
         Err(e) => {
-            tracing::error!("Kiro API 调用失败: {}", e);
+            let error_msg = e.to_string();
+            tracing::error!("Kiro API 调用失败: {}", error_msg);
+            let (status, error_type) = determine_error_status(&error_msg);
             return (
-                StatusCode::BAD_GATEWAY,
+                status,
                 Json(ErrorResponse::new(
-                    "api_error",
-                    format!("上游 API 调用失败: {}", e),
+                    error_type,
+                    format!("上游 API 调用失败: {}", error_msg),
                 )),
             )
                 .into_response();
@@ -347,12 +362,14 @@ async fn handle_non_stream_request(
     let response = match provider.call_api(request_body).await {
         Ok(resp) => resp,
         Err(e) => {
-            tracing::error!("Kiro API 调用失败: {}", e);
+            let error_msg = e.to_string();
+            tracing::error!("Kiro API 调用失败: {}", error_msg);
+            let (status, error_type) = determine_error_status(&error_msg);
             return (
-                StatusCode::BAD_GATEWAY,
+                status,
                 Json(ErrorResponse::new(
-                    "api_error",
-                    format!("上游 API 调用失败: {}", e),
+                    error_type,
+                    format!("上游 API 调用失败: {}", error_msg),
                 )),
             )
                 .into_response();
