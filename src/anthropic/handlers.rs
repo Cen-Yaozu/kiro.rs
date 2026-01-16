@@ -5,6 +5,8 @@ use std::convert::Infallible;
 use crate::kiro::model::events::Event;
 use crate::kiro::model::requests::kiro::KiroRequest;
 use crate::kiro::parser::decoder::EventStreamDecoder;
+use crate::kiro::provider::StreamResponse;
+use crate::kiro::token_manager::ConnectionGuard;
 use crate::token;
 use axum::{
     Json as JsonExtractor,
@@ -212,7 +214,7 @@ async fn handle_stream_request(
     thinking_enabled: bool,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api_stream(request_body).await {
+    let stream_response = match provider.call_api_stream(request_body).await {
         Ok(resp) => resp,
         Err(e) => {
             let error_msg = e.to_string();
@@ -229,14 +231,17 @@ async fn handle_stream_request(
         }
     };
 
+    // 解构 StreamResponse，获取 response 和 guard
+    let StreamResponse { response, guard } = stream_response;
+
     // 创建流处理上下文
     let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled);
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
 
-    // 创建 SSE 流
-    let stream = create_sse_stream(response, ctx, initial_events);
+    // 创建 SSE 流，传入 guard 以保持其生命周期
+    let stream = create_sse_stream(response, ctx, initial_events, guard);
 
     // 返回 SSE 响应
     Response::builder()
@@ -257,10 +262,14 @@ fn create_ping_sse() -> Bytes {
 }
 
 /// 创建 SSE 事件流
+///
+/// guard 参数用于保持 ConnectionGuard 的生命周期，确保 active_connections 计数
+/// 在流完全结束后才递减
 fn create_sse_stream(
     response: reqwest::Response,
     ctx: StreamContext,
     initial_events: Vec<SseEvent>,
+    guard: ConnectionGuard,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     // 先发送初始事件
     let initial_stream = stream::iter(
@@ -272,10 +281,13 @@ fn create_sse_stream(
     // 然后处理 Kiro 响应流，同时每25秒发送 ping 保活
     let body_stream = response.bytes_stream();
 
+    // guard 被移入闭包状态，随流一起存活
     let processing_stream = stream::unfold(
-        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS))),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
+        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS)), Some(guard)),
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, guard)| async move {
             if finished {
+                // 流结束时 guard 会被 drop，active_connections 递减
+                drop(guard);
                 return None;
             }
 
@@ -311,7 +323,7 @@ fn create_sse_stream(
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
 
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, guard)))
                         }
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
@@ -321,7 +333,7 @@ fn create_sse_stream(
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, guard)))
                         }
                         None => {
                             // 流结束，发送最终事件
@@ -330,7 +342,7 @@ fn create_sse_stream(
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, guard)))
                         }
                     }
                 }
@@ -338,7 +350,7 @@ fn create_sse_stream(
                 _ = ping_interval.tick() => {
                     tracing::trace!("发送 ping 保活事件");
                     let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, guard)))
                 }
             }
         },

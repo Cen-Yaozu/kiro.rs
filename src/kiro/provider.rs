@@ -13,7 +13,16 @@ use uuid::Uuid;
 
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::machine_id;
-use crate::kiro::token_manager::{AcquiredContext, CallContext, MultiTokenManager};
+use crate::kiro::token_manager::{AcquiredContext, CallContext, ConnectionGuard, MultiTokenManager};
+
+/// 流式响应，包含 Response 和 ConnectionGuard
+///
+/// Guard 的生命周期决定了 active_connections 计数的生命周期
+/// 调用方需要持有此结构直到流完全消费完毕
+pub struct StreamResponse {
+    pub response: reqwest::Response,
+    pub guard: ConnectionGuard,
+}
 
 #[cfg(test)]
 use crate::kiro::model::credentials::KiroCredentials;
@@ -214,9 +223,10 @@ impl KiroProvider {
     /// * `request_body` - JSON 格式的请求体字符串
     ///
     /// # Returns
-    /// 返回原始的 HTTP Response，调用方负责处理流式数据
-    pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
-        self.call_api_with_retry(request_body, true).await
+    /// 返回 StreamResponse，包含 Response 和 ConnectionGuard
+    /// 调用方需要持有 guard 直到流完全消费完毕
+    pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<StreamResponse> {
+        self.call_api_stream_with_retry(request_body).await
     }
 
     /// 发送 MCP API 请求
@@ -546,6 +556,146 @@ impl KiroProvider {
         let jitter_max = (backoff / 4).max(1);
         let jitter = fastrand::u64(0..=jitter_max);
         Duration::from_millis(backoff.saturating_add(jitter))
+    }
+
+    /// 内部方法：带重试逻辑的流式 API 调用
+    ///
+    /// 与 call_api_with_retry 类似，但返回 StreamResponse 以保持 guard 生命周期
+    async fn call_api_stream_with_retry(
+        &self,
+        request_body: &str,
+    ) -> anyhow::Result<StreamResponse> {
+        let total_credentials = self.token_manager.total_count();
+        let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..max_retries {
+            let acquired = match self.token_manager.acquire_context().await {
+                Ok(a) => a,
+                Err(e) => {
+                    last_error = Some(e);
+                    continue;
+                }
+            };
+
+            let AcquiredContext { ctx, guard } = acquired;
+            let id = ctx.id;
+
+            let url = self.base_url();
+            let headers = match self.build_headers(&ctx) {
+                Ok(h) => h,
+                Err(e) => {
+                    last_error = Some(e);
+                    continue;
+                }
+            };
+
+            let response = match self
+                .client
+                .post(&url)
+                .headers(headers)
+                .body(request_body.to_string())
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::warn!(
+                        "流式 API 请求发送失败（尝试 {}/{}）: {}",
+                        attempt + 1,
+                        max_retries,
+                        e
+                    );
+                    last_error = Some(e.into());
+                    if attempt + 1 < max_retries {
+                        sleep(Self::retry_delay(attempt)).await;
+                    }
+                    continue;
+                }
+            };
+
+            let status = response.status();
+
+            if status.is_success() {
+                self.token_manager.report_success(id);
+                // 返回 StreamResponse，guard 由调用方持有
+                return Ok(StreamResponse { response, guard });
+            }
+
+            // 失败响应处理（与 call_api_with_retry 相同）
+            let body = response.text().await.unwrap_or_default();
+
+            if status.as_u16() == 402 && Self::is_monthly_request_limit(&body) {
+                tracing::warn!(
+                    "流式 API 请求失败（额度已用尽，尝试 {}/{}）: {} {}",
+                    attempt + 1,
+                    max_retries,
+                    status,
+                    body
+                );
+                let has_available = self.token_manager.report_quota_exhausted(id);
+                if !has_available {
+                    anyhow::bail!("流式 API 请求失败（所有凭据已用尽）: {} {}", status, body);
+                }
+                last_error = Some(anyhow::anyhow!("流式 API 请求失败: {} {}", status, body));
+                continue;
+            }
+
+            if status.as_u16() == 400 {
+                anyhow::bail!("流式 API 请求失败: {} {}", status, body);
+            }
+
+            if matches!(status.as_u16(), 401 | 403) {
+                tracing::warn!(
+                    "流式 API 请求失败（可能为凭据错误，尝试 {}/{}）: {} {}",
+                    attempt + 1,
+                    max_retries,
+                    status,
+                    body
+                );
+                let has_available = self.token_manager.report_failure(id);
+                if !has_available {
+                    anyhow::bail!("流式 API 请求失败（所有凭据已用尽）: {} {}", status, body);
+                }
+                last_error = Some(anyhow::anyhow!("流式 API 请求失败: {} {}", status, body));
+                continue;
+            }
+
+            if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+                tracing::warn!(
+                    "流式 API 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
+                    attempt + 1,
+                    max_retries,
+                    status,
+                    body
+                );
+                last_error = Some(anyhow::anyhow!("流式 API 请求失败: {} {}", status, body));
+                if attempt + 1 < max_retries {
+                    sleep(Self::retry_delay(attempt)).await;
+                }
+                continue;
+            }
+
+            if status.is_client_error() {
+                anyhow::bail!("流式 API 请求失败: {} {}", status, body);
+            }
+
+            tracing::warn!(
+                "流式 API 请求失败（未知错误，尝试 {}/{}）: {} {}",
+                attempt + 1,
+                max_retries,
+                status,
+                body
+            );
+            last_error = Some(anyhow::anyhow!("流式 API 请求失败: {} {}", status, body));
+            if attempt + 1 < max_retries {
+                sleep(Self::retry_delay(attempt)).await;
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            anyhow::anyhow!("流式 API 请求失败：已达到最大重试次数（{}次）", max_retries)
+        }))
     }
 
     fn is_monthly_request_limit(body: &str) -> bool {

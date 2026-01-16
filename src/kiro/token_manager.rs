@@ -663,27 +663,58 @@ impl MultiTokenManager {
                     anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
                 }
 
-                // Least-Connections 选择：优先级 > 活跃连接数 > ID
-                let entry = entries
+                // 单凭证最大并发数
+                const MAX_CONCURRENT_PER_CREDENTIAL: usize = 3;
+
+                // Least-Connections 选择：优先级 > 活跃连接数
+                // 1. 先筛选出可用且未超过并发限制的凭证
+                // 2. 按 (priority, active_connections) 排序
+                // 3. 找出最小值相同的所有凭证，随机选一个
+                let candidates: Vec<_> = entries
                     .iter()
                     .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
-                    .min_by_key(|e| {
-                        (
-                            e.credentials.priority,
-                            e.active_connections.load(Ordering::Acquire),
-                            e.id,
-                        )
-                    });
+                    .filter(|e| e.active_connections.load(Ordering::Acquire) < MAX_CONCURRENT_PER_CREDENTIAL)
+                    .collect();
 
-                let entry = match entry {
-                    Some(e) => e,
-                    None => {
-                        anyhow::bail!(
-                            "所有凭据均无法获取有效 Token（可用: {}/{}）",
-                            available,
-                            total
-                        );
-                    }
+                // 如果所有凭证都超过并发限制，退化为选择连接数最少的
+                let candidates = if candidates.is_empty() {
+                    entries
+                        .iter()
+                        .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
+                        .collect::<Vec<_>>()
+                } else {
+                    candidates
+                };
+
+                if candidates.is_empty() {
+                    anyhow::bail!(
+                        "所有凭据均无法获取有效 Token（可用: {}/{}）",
+                        available,
+                        total
+                    );
+                }
+
+                // 找出最小的 (priority, active_connections)
+                let min_key = candidates
+                    .iter()
+                    .map(|e| (e.credentials.priority, e.active_connections.load(Ordering::Acquire)))
+                    .min()
+                    .unwrap();
+
+                // 筛选出所有具有相同最小值的凭证
+                let best_candidates: Vec<_> = candidates
+                    .into_iter()
+                    .filter(|e| {
+                        (e.credentials.priority, e.active_connections.load(Ordering::Acquire)) == min_key
+                    })
+                    .collect();
+
+                // 从最佳候选中随机选择一个
+                let entry = if best_candidates.len() == 1 {
+                    best_candidates[0]
+                } else {
+                    let idx = fastrand::usize(..best_candidates.len());
+                    best_candidates[idx]
                 };
 
                 let id = entry.id;
