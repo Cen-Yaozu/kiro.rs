@@ -101,12 +101,68 @@ pub struct MessagesRequest {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default, deserialize_with = "deserialize_system")]
     pub system: Option<Vec<SystemMessage>>,
     pub tools: Option<Vec<Tool>>,
     pub tool_choice: Option<serde_json::Value>,
     pub thinking: Option<Thinking>,
     /// Claude Code 请求中的 metadata，包含 session 信息
     pub metadata: Option<Metadata>,
+}
+
+/// 反序列化 system 字段，支持字符串或数组格式
+fn deserialize_system<'de, D>(deserializer: D) -> Result<Option<Vec<SystemMessage>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    // 创建一个 visitor 来处理 string 或 array
+    struct SystemVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for SystemVisitor {
+        type Value = Option<Vec<SystemMessage>>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or an array of system messages")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(vec![SystemMessage {
+                text: value.to_string(),
+            }]))
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut messages = Vec::new();
+            while let Some(msg) = seq.next_element()? {
+                messages.push(msg);
+            }
+            Ok(if messages.is_empty() { None } else { Some(messages) })
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            serde::de::Deserialize::deserialize(deserializer)
+        }
+    }
+
+    deserializer.deserialize_any(SystemVisitor)
 }
 
 /// 消息
@@ -124,11 +180,36 @@ pub struct SystemMessage {
 }
 
 /// 工具定义
+///
+/// 支持两种格式：
+/// 1. 普通工具：{ name, description, input_schema }
+/// 2. WebSearch 工具：{ type: "web_search_20250305", name: "web_search", max_uses: 8 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Tool {
+    /// 工具类型，如 "web_search_20250305"（可选，仅 WebSearch 工具）
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<String>,
+    /// 工具名称
+    #[serde(default)]
     pub name: String,
+    /// 工具描述（普通工具必需，WebSearch 工具可选）
+    #[serde(default)]
     pub description: String,
+    /// 输入参数 schema（普通工具必需，WebSearch 工具无此字段）
+    #[serde(default)]
     pub input_schema: HashMap<String, serde_json::Value>,
+    /// 最大使用次数（仅 WebSearch 工具）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_uses: Option<i32>,
+}
+
+impl Tool {
+    /// 检查是否为 WebSearch 工具
+    pub fn is_web_search(&self) -> bool {
+        self.tool_type
+            .as_ref()
+            .is_some_and(|t| t.starts_with("web_search"))
+    }
 }
 
 /// 内容块
@@ -172,7 +253,11 @@ pub struct ImageSource {
 pub struct CountTokensRequest {
     pub model: String,
     pub messages: Vec<Message>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_system"
+    )]
     pub system: Option<Vec<SystemMessage>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
