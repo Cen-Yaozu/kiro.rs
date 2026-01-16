@@ -666,10 +666,10 @@ impl MultiTokenManager {
                 // 单凭证最大并发数
                 const MAX_CONCURRENT_PER_CREDENTIAL: usize = 3;
 
-                // Least-Connections 选择：优先级 > 活跃连接数
+                // Least-Connections 负载均衡：
                 // 1. 先筛选出可用且未超过并发限制的凭证
-                // 2. 按 (priority, active_connections) 排序
-                // 3. 找出最小值相同的所有凭证，随机选一个
+                // 2. 找出连接数最少的凭证
+                // 3. 如果有多个连接数相同的，随机选一个
                 let candidates: Vec<_> = entries
                     .iter()
                     .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
@@ -694,19 +694,17 @@ impl MultiTokenManager {
                     );
                 }
 
-                // 找出最小的 (priority, active_connections)
-                let min_key = candidates
+                // 找出最小的 active_connections
+                let min_connections = candidates
                     .iter()
-                    .map(|e| (e.credentials.priority, e.active_connections.load(Ordering::Acquire)))
+                    .map(|e| e.active_connections.load(Ordering::Acquire))
                     .min()
                     .unwrap();
 
-                // 筛选出所有具有相同最小值的凭证
+                // 筛选出所有具有相同最小连接数的凭证
                 let best_candidates: Vec<_> = candidates
                     .into_iter()
-                    .filter(|e| {
-                        (e.credentials.priority, e.active_connections.load(Ordering::Acquire)) == min_key
-                    })
+                    .filter(|e| e.active_connections.load(Ordering::Acquire) == min_connections)
                     .collect();
 
                 // 从最佳候选中随机选择一个
