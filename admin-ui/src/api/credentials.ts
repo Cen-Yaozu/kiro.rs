@@ -5,7 +5,6 @@ import type {
   BalanceResponse,
   SuccessResponse,
   SetDisabledRequest,
-  SetPriorityRequest,
   AddCredentialRequest,
   AddCredentialResponse,
 } from '@/types/api'
@@ -41,18 +40,6 @@ export async function setCredentialDisabled(
   const { data } = await api.post<SuccessResponse>(
     `/credentials/${id}/disabled`,
     { disabled } as SetDisabledRequest
-  )
-  return data
-}
-
-// 设置凭据优先级
-export async function setCredentialPriority(
-  id: number,
-  priority: number
-): Promise<SuccessResponse> {
-  const { data } = await api.post<SuccessResponse>(
-    `/credentials/${id}/priority`,
-    { priority } as SetPriorityRequest
   )
   return data
 }

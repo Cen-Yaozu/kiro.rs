@@ -16,6 +16,8 @@ export interface CredentialStatusItem {
   expiresAt: string | null
   authMethod: string | null
   hasProfileArn: boolean
+  activeConnections: number
+  maxConcurrent: number
 }
 
 // 余额响应
@@ -46,10 +48,6 @@ export interface AdminErrorResponse {
 // 请求类型
 export interface SetDisabledRequest {
   disabled: boolean
-}
-
-export interface SetPriorityRequest {
-  priority: number
 }
 
 // 添加凭据请求

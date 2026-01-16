@@ -38,6 +38,10 @@ pub struct CredentialStatusItem {
     pub auth_method: Option<String>,
     /// 是否有 Profile ARN
     pub has_profile_arn: bool,
+    /// 当前活跃连接数
+    pub active_connections: u32,
+    /// 最大并发连接数
+    pub max_concurrent: u32,
 }
 
 // ============ 操作请求 ============

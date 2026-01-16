@@ -2,7 +2,6 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   getCredentials,
   setCredentialDisabled,
-  setCredentialPriority,
   resetCredentialFailure,
   refreshCredentialToken,
   getCredentialBalance,
@@ -36,18 +35,6 @@ export function useSetDisabled() {
   return useMutation({
     mutationFn: ({ id, disabled }: { id: number; disabled: boolean }) =>
       setCredentialDisabled(id, disabled),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['credentials'] })
-    },
-  })
-}
-
-// 设置优先级
-export function useSetPriority() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ id, priority }: { id: number; priority: number }) =>
-      setCredentialPriority(id, priority),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

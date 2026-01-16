@@ -423,6 +423,10 @@ pub struct CredentialEntrySnapshot {
     pub has_profile_arn: bool,
     /// Token 过期时间
     pub expires_at: Option<String>,
+    /// 当前活跃连接数
+    pub active_connections: u32,
+    /// 最大并发连接数
+    pub max_concurrent: u32,
 }
 
 /// 凭据管理器状态快照
@@ -460,6 +464,9 @@ pub struct MultiTokenManager {
 
 /// 每个凭据最大 API 调用失败次数
 const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
+
+/// 每个凭据最大并发连接数
+pub const MAX_CONCURRENT_PER_CREDENTIAL: u32 = 3;
 
 /// API 调用上下文
 ///
@@ -664,7 +671,7 @@ impl MultiTokenManager {
                 }
 
                 // 单凭证最大并发数
-                const MAX_CONCURRENT_PER_CREDENTIAL: usize = 3;
+                let max_concurrent = MAX_CONCURRENT_PER_CREDENTIAL as usize;
 
                 // Least-Connections 负载均衡：
                 // 1. 先筛选出可用且未超过并发限制的凭证
@@ -673,7 +680,7 @@ impl MultiTokenManager {
                 let candidates: Vec<_> = entries
                     .iter()
                     .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
-                    .filter(|e| e.active_connections.load(Ordering::Acquire) < MAX_CONCURRENT_PER_CREDENTIAL)
+                    .filter(|e| e.active_connections.load(Ordering::Acquire) < max_concurrent)
                     .collect();
 
                 // 如果所有凭证都超过并发限制，退化为选择连接数最少的
@@ -1088,6 +1095,8 @@ impl MultiTokenManager {
                     auth_method: e.credentials.auth_method.clone(),
                     has_profile_arn: e.credentials.profile_arn.is_some(),
                     expires_at: e.credentials.expires_at.clone(),
+                    active_connections: e.active_connections.load(Ordering::Acquire) as u32,
+                    max_concurrent: MAX_CONCURRENT_PER_CREDENTIAL,
                 })
                 .collect(),
             current_id,

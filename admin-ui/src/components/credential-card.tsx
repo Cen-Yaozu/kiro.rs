@@ -1,11 +1,10 @@
 import { useState } from 'react'
 import { toast } from 'sonner'
-import { RefreshCw, ChevronUp, ChevronDown, Wallet, RotateCcw, Trash2 } from 'lucide-react'
+import { RefreshCw, Wallet, RotateCcw, Trash2 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
-import { Input } from '@/components/ui/input'
 import {
   Dialog,
   DialogContent,
@@ -17,7 +16,6 @@ import {
 import type { CredentialStatusItem } from '@/types/api'
 import {
   useSetDisabled,
-  useSetPriority,
   useResetFailure,
   useRefreshToken,
   useDeleteCredential,
@@ -29,12 +27,9 @@ interface CredentialCardProps {
 }
 
 export function CredentialCard({ credential, onViewBalance }: CredentialCardProps) {
-  const [editingPriority, setEditingPriority] = useState(false)
-  const [priorityValue, setPriorityValue] = useState(String(credential.priority))
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
 
   const setDisabled = useSetDisabled()
-  const setPriority = useSetPriority()
   const resetFailure = useResetFailure()
   const refreshToken = useRefreshToken()
   const deleteCredential = useDeleteCredential()
@@ -45,26 +40,6 @@ export function CredentialCard({ credential, onViewBalance }: CredentialCardProp
       {
         onSuccess: (res) => {
           toast.success(res.message)
-        },
-        onError: (err) => {
-          toast.error('操作失败: ' + (err as Error).message)
-        },
-      }
-    )
-  }
-
-  const handlePriorityChange = () => {
-    const newPriority = parseInt(priorityValue, 10)
-    if (isNaN(newPriority) || newPriority < 0) {
-      toast.error('优先级必须是非负整数')
-      return
-    }
-    setPriority.mutate(
-      { id: credential.id, priority: newPriority },
-      {
-        onSuccess: (res) => {
-          toast.success(res.message)
-          setEditingPriority(false)
         },
         onError: (err) => {
           toast.error('操作失败: ' + (err as Error).message)
@@ -120,6 +95,8 @@ export function CredentialCard({ credential, onViewBalance }: CredentialCardProp
     return `${Math.floor(hours / 24)} 天`
   }
 
+  const isConnectionFull = credential.activeConnections >= credential.maxConcurrent
+
   return (
     <>
       <Card className={credential.isCurrent ? 'ring-2 ring-primary' : ''}>
@@ -148,46 +125,10 @@ export function CredentialCard({ credential, onViewBalance }: CredentialCardProp
           {/* 信息网格 */}
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
-              <span className="text-muted-foreground">优先级：</span>
-              {editingPriority ? (
-                <div className="inline-flex items-center gap-1 ml-1">
-                  <Input
-                    type="number"
-                    value={priorityValue}
-                    onChange={(e) => setPriorityValue(e.target.value)}
-                    className="w-16 h-7 text-sm"
-                    min="0"
-                  />
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-7 w-7 p-0"
-                    onClick={handlePriorityChange}
-                    disabled={setPriority.isPending}
-                  >
-                    ✓
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-7 w-7 p-0"
-                    onClick={() => {
-                      setEditingPriority(false)
-                      setPriorityValue(String(credential.priority))
-                    }}
-                  >
-                    ✕
-                  </Button>
-                </div>
-              ) : (
-                <span
-                  className="font-medium cursor-pointer hover:underline ml-1"
-                  onClick={() => setEditingPriority(true)}
-                >
-                  {credential.priority}
-                  <span className="text-xs text-muted-foreground ml-1">(点击编辑)</span>
-                </span>
-              )}
+              <span className="text-muted-foreground">并发：</span>
+              <span className={isConnectionFull ? 'text-orange-500 font-medium' : 'font-medium'}>
+                {credential.activeConnections}/{credential.maxConcurrent}
+              </span>
             </div>
             <div>
               <span className="text-muted-foreground">失败次数：</span>
@@ -229,42 +170,6 @@ export function CredentialCard({ credential, onViewBalance }: CredentialCardProp
             >
               <RefreshCw className="h-4 w-4 mr-1" />
               重置失败
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                const newPriority = Math.max(0, credential.priority - 1)
-                setPriority.mutate(
-                  { id: credential.id, priority: newPriority },
-                  {
-                    onSuccess: (res) => toast.success(res.message),
-                    onError: (err) => toast.error('操作失败: ' + (err as Error).message),
-                  }
-                )
-              }}
-              disabled={setPriority.isPending || credential.priority === 0}
-            >
-              <ChevronUp className="h-4 w-4 mr-1" />
-              提高优先级
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                const newPriority = credential.priority + 1
-                setPriority.mutate(
-                  { id: credential.id, priority: newPriority },
-                  {
-                    onSuccess: (res) => toast.success(res.message),
-                    onError: (err) => toast.error('操作失败: ' + (err as Error).message),
-                  }
-                )
-              }}
-              disabled={setPriority.isPending}
-            >
-              <ChevronDown className="h-4 w-4 mr-1" />
-              降低优先级
             </Button>
             <Button
               size="sm"

@@ -39,6 +39,8 @@ impl AdminService {
                 expires_at: entry.expires_at,
                 auth_method: entry.auth_method,
                 has_profile_arn: entry.has_profile_arn,
+                active_connections: entry.active_connections,
+                max_concurrent: entry.max_concurrent,
             })
             .collect();
 
