@@ -164,10 +164,16 @@ pub async fn post_messages(
     // 估算输入 tokens
     let input_tokens = token::count_all_tokens(
         payload.model.clone(),
-        payload.system,
-        payload.messages,
-        payload.tools,
+        payload.system.clone(),
+        payload.messages.clone(),
+        payload.tools.clone(),
     ) as i32;
+
+    tracing::info!(
+        "Token 计数 - 消息数: {}, 输入 tokens: {}",
+        payload.messages.len(),
+        input_tokens
+    );
 
     // 检查是否启用了thinking
     let thinking_enabled = payload
