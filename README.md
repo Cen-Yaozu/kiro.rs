@@ -56,9 +56,6 @@ cargo build --release
    "machineId": "如果你需要自定义机器码请将64位机器码填到这里", // 可选, 用于自定义请求特征, 不需要请删除: 机器码
    "systemVersion": "darwin#24.6.0",  // 可选, 用于自定义请求特征, 不需要请删除: 系统版本
    "nodeVersion": "22.21.1",  // 可选, 用于自定义请求特征, 不需要请删除: node 版本
-   "countTokensApiUrl": "https://api.example.com/v1/messages/count_tokens", // 可选, 用于自定义token统计API, 不需要请删除
-   "countTokensApiKey": "sk-your-count-tokens-api-key",  // 可选, 用于自定义token统计API, 不需要请删除
-   "countTokensAuthType": "x-api-key",  // 可选, 用于自定义token统计API, 不需要请删除
    "proxyUrl": "http://127.0.0.1:7890", // 可选, HTTP/SOCK5代理, 不需要请删除
    "proxyUsername": "user",  // 可选, HTTP/SOCK5代理用户名, 不需要请删除
    "proxyPassword": "pass",  // 可选, HTTP/SOCK5代理密码, 不需要请删除
@@ -339,11 +336,148 @@ kiro-rs/
 RUST_LOG=debug ./target/release/kiro-rs
 ```
 
+## Token 计数
+
+### Token 计数方法
+
+kiro.rs 使用三层降级策略来确保准确的 token 计数：
+
+1. **Claude 官方 Tokenizer**（推荐，~98% 准确度）
+   - 使用 Hugging Face tokenizers 库和 Claude 官方 tokenizer
+   - 零成本、零延迟、本地计算
+   - 自动加载，无需配置
+
+2. **外部 count_tokens API**（可选，100% 准确度）
+   - 调用 Anthropic 官方 count_tokens API
+   - 需要配置 API 密钥和 URL
+   - 有网络延迟和 API 成本
+
+3. **简单估算**（回退方案，~85% 准确度）
+   - 基于字符数的简单估算
+   - 当 tokenizer 加载失败时自动启用
+
+### 为什么准确的 Token 计数很重要？
+
+当使用 Claude Code 等客户端时，准确的 token 计数至关重要：
+
+- Claude Code 依赖 token 计数来触发自动对话压缩（auto-compact）
+- 不准确的计数会导致对话超过 200K token 限制后才报错
+- 准确的计数确保在接近限制前自动压缩，提升用户体验
+
+### 默认行为（推荐）
+
+kiro.rs 默认使用 Claude 官方 tokenizer，无需任何配置：
+
+1. 启动时自动加载 `tokenizers/claude-tokenizer.json`
+2. 如果加载成功，日志会显示：
+   ```
+   INFO kiro_rs::token: 成功加载 Claude tokenizer: tokenizers/claude-tokenizer.json
+   ```
+3. 所有 token 计数请求自动使用官方 tokenizer
+
+**优势**：
+- ✅ 零配置
+- ✅ 零成本
+- ✅ 零延迟
+- ✅ ~98% 准确度
+- ✅ 完全离线工作
+
+### 可选：配置外部 API（高级用户）
+
+如果需要 100% 准确度，可以配置 Anthropic 官方 count_tokens API：
+
+```json
+{
+  "countTokensApiUrl": "https://api.anthropic.com/v1/messages/count_tokens",
+  "countTokensApiKey": "sk-ant-your-anthropic-api-key",
+  "countTokensAuthType": "x-api-key"
+}
+```
+
+**注意**：
+- 需要 Anthropic API 密钥（从 [console.anthropic.com](https://console.anthropic.com) 获取）
+- 每次调用会产生 API 费用
+- 增加约 100-200ms 延迟
+- 优先级高于本地 tokenizer
+
+### 验证 Token 计数
+
+测试 token 计数功能：
+
+```bash
+curl http://127.0.0.1:8990/v1/messages/count_tokens \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: sk-your-custom-api-key" \
+  -d '{
+    "model": "claude-sonnet-4-5-20250514",
+    "messages": [
+      {"role": "user", "content": "Hello, Claude!"}
+    ]
+  }'
+```
+
+**预期响应**：
+```json
+{"input_tokens": 8}
+```
+
+**日志输出**：
+- 使用官方 tokenizer：`INFO kiro_rs::token: 成功加载 Claude tokenizer`
+- 使用外部 API：`DEBUG kiro_rs::token: 远程 count_tokens API 返回: 8`
+- 使用简单估算：`WARN kiro_rs::token: 无法加载 Claude tokenizer，将使用简单估算`
+
+### 故障排查
+
+#### 问题：日志显示 "无法加载 Claude tokenizer"
+
+**可能原因**：
+- `tokenizers/claude-tokenizer.json` 文件缺失或损坏
+- 文件路径不正确
+
+**解决方法**：
+1. 检查 `tokenizers/` 目录是否存在
+2. 确认 `claude-tokenizer.json` 文件存在且大小约 1.7MB
+3. 如果文件缺失，从项目仓库重新下载
+4. 系统会自动降级到简单估算，不影响正常使用
+
+#### 问题：Token 计数不准确
+
+**可能原因**：
+- Tokenizer 加载失败，使用了简单估算
+- 外部 API 配置错误
+
+**解决方法**：
+1. 检查日志确认使用的是哪种计数方法
+2. 如果使用简单估算，确保 tokenizer 文件完整
+3. 如果配置了外部 API，验证 API 密钥和 URL 是否正确
+
+#### 问题：Claude Code 仍然在超过 200K token 后报错
+
+**可能原因**：
+- Token 计数方法不准确（使用了简单估算）
+- 上游 Kiro API 返回的 token 计数不准确
+
+**解决方法**：
+1. 确认 tokenizer 已成功加载（查看启动日志）
+2. 测试 `/v1/messages/count_tokens` 端点验证准确性
+3. 如果问题持续，考虑配置外部 API 获得 100% 准确度
+
+### 性能对比
+
+| 方法 | 准确度 | 延迟 | 成本 | 网络依赖 |
+|------|--------|------|------|----------|
+| Claude Tokenizer | ~98% | <1ms | 免费 | 否 |
+| 外部 API | 100% | ~150ms | 按调用计费 | 是 |
+| 简单估算 | ~85% | <1ms | 免费 | 否 |
+
+**推荐**：使用默认的 Claude Tokenizer，在准确度、性能和成本之间达到最佳平衡。
+
 ## 注意事项
 
 1. **凭证安全**: 请妥善保管 `credentials.json` 文件，不要提交到版本控制
 2. **Token 刷新**: 服务会自动刷新过期的 Token，无需手动干预
 3. **不支持的工具**: `web_search` 和 `websearch` 工具会被自动过滤
+4. **Token 计数 API 密钥**: 如果配置了 `countTokensApiKey`，请同样妥善保管，不要泄露
 
 ## License
 

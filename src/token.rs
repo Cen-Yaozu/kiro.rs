@@ -2,16 +2,17 @@
 //!
 //! 提供文本 token 数量计算功能。
 //!
-//! # 计算规则
-//! - 非西文字符：每个计 4.5 个字符单位
-//! - 西文字符：每个计 1 个字符单位
-//! - 4 个字符单位 = 1 token（四舍五入）
+//! # 计算方法
+//! - 优先使用 Hugging Face tokenizers（Claude 官方 tokenizer）
+//! - 如果 tokenizer 加载失败，回退到简单估算
+//! - 支持远程 API 调用（可选）
 
 use crate::anthropic::types::{
     CountTokensRequest, CountTokensResponse, Message, SystemMessage, Tool,
 };
 use crate::http_client::{ProxyConfig, build_client};
 use std::sync::OnceLock;
+use tokenizers::Tokenizer;
 
 /// Count Tokens API 配置
 #[derive(Clone, Default)]
@@ -29,6 +30,9 @@ pub struct CountTokensConfig {
 /// 全局配置存储
 static COUNT_TOKENS_CONFIG: OnceLock<CountTokensConfig> = OnceLock::new();
 
+/// 全局 Claude tokenizer
+static CLAUDE_TOKENIZER: OnceLock<Option<Tokenizer>> = OnceLock::new();
+
 /// 初始化 count_tokens 配置
 ///
 /// 应在应用启动时调用一次
@@ -36,72 +40,94 @@ pub fn init_config(config: CountTokensConfig) {
     let _ = COUNT_TOKENS_CONFIG.set(config);
 }
 
+/// 初始化 Claude tokenizer
+///
+/// 尝试从文件加载 tokenizer，如果失败则返回 None
+fn init_tokenizer() -> Option<Tokenizer> {
+    // 尝试从多个可能的路径加载 tokenizer
+    let paths = vec![
+        "tokenizers/claude-tokenizer.json",
+        "./tokenizers/claude-tokenizer.json",
+        "../tokenizers/claude-tokenizer.json",
+    ];
+
+    for path in paths {
+        match Tokenizer::from_file(path) {
+            Ok(tokenizer) => {
+                tracing::info!("成功加载 Claude tokenizer: {}", path);
+                return Some(tokenizer);
+            }
+            Err(e) => {
+                tracing::debug!("无法从 {} 加载 tokenizer: {}", path, e);
+            }
+        }
+    }
+
+    tracing::warn!("无法加载 Claude tokenizer，将使用简单估算");
+    None
+}
+
+/// 获取 Claude tokenizer
+fn get_tokenizer() -> Option<&'static Tokenizer> {
+    CLAUDE_TOKENIZER
+        .get_or_init(init_tokenizer)
+        .as_ref()
+}
+
 /// 获取配置
 fn get_config() -> Option<&'static CountTokensConfig> {
     COUNT_TOKENS_CONFIG.get()
 }
 
-/// 判断字符是否为非西文字符
-///
-/// 西文字符包括：
-/// - ASCII 字符 (U+0000..U+007F)
-/// - 拉丁字母扩展 (U+0080..U+024F)
-/// - 拉丁字母扩展附加 (U+1E00..U+1EFF)
-///
-/// 返回 true 表示该字符是非西文字符（如中文、日文、韩文、阿拉伯文等）
-fn is_non_western_char(c: char) -> bool {
-    !matches!(c,
-        // 基本 ASCII
-        '\u{0000}'..='\u{007F}' |
-        // 拉丁字母扩展-A (Latin Extended-A)
-        '\u{0080}'..='\u{00FF}' |
-        // 拉丁字母扩展-B (Latin Extended-B)
-        '\u{0100}'..='\u{024F}' |
-        // 拉丁字母扩展附加 (Latin Extended Additional)
-        '\u{1E00}'..='\u{1EFF}' |
-        // 拉丁字母扩展-C/D/E
-        '\u{2C60}'..='\u{2C7F}' |
-        '\u{A720}'..='\u{A7FF}' |
-        '\u{AB30}'..='\u{AB6F}'
-    )
-}
-
 /// 计算文本的 token 数量
 ///
-/// # 计算规则
-/// - 非西文字符：每个计 4.5 个字符单位
-/// - 西文字符：每个计 1 个字符单位
-/// - 4 个字符单位 = 1 token（四舍五入）
-/// ```
+/// 优先使用 Claude tokenizer，失败时回退到简单估算
 pub fn count_tokens(text: &str) -> u64 {
-    // println!("text: {}", text);
+    // 尝试使用 Claude tokenizer
+    if let Some(tokenizer) = get_tokenizer() {
+        match tokenizer.encode(text, false) {
+            Ok(encoding) => {
+                let count = encoding.get_ids().len() as u64;
+                return count;
+            }
+            Err(e) => {
+                tracing::warn!("Tokenizer 编码失败，回退到简单估算: {}", e);
+            }
+        }
+    }
 
-    let char_units: f64 = text
-        .chars()
-        .map(|c| if is_non_western_char(c) { 4.0 } else { 1.0 })
-        .sum();
+    // 回退到简单估算
+    count_tokens_fallback(text)
+}
 
-    let tokens = char_units / 4.0;
+/// 简单估算（回退方法）
+///
+/// 基于字符数的简单估算：
+/// - 英文：约 4 个字符 = 1 token
+/// - 中文：约 1.5 个字符 = 1 token
+fn count_tokens_fallback(text: &str) -> u64 {
+    let char_count = text.chars().count() as f64;
 
-    let acc_token = if tokens < 100.0 {
-        tokens * 1.5
-    } else if tokens < 200.0 {
-        tokens * 1.3
-    } else if tokens < 300.0 {
-        tokens * 1.25
-    } else if tokens < 800.0 {
-        tokens * 1.2
+    // 检测文本类型
+    let non_ascii_count = text.chars().filter(|c| !c.is_ascii()).count() as f64;
+    let non_ascii_ratio = non_ascii_count / char_count.max(1.0);
+
+    // 根据非 ASCII 字符比例调整估算
+    let tokens = if non_ascii_ratio > 0.5 {
+        // 主要是中文/日文/韩文等
+        char_count / 1.5
     } else {
-        tokens * 1.0
-    } as u64;
+        // 主要是英文
+        char_count / 4.0
+    };
 
-    // println!("tokens: {}, acc_tokens: {}", tokens, acc_token);
-    acc_token
+    // 添加 10% 安全边际
+    (tokens * 1.1).ceil() as u64
 }
 
 /// 估算请求的输入 tokens
 ///
-/// 优先调用远程 API，失败时回退到本地计算
+/// 优先级：远程 API > Claude tokenizer > 简单估算
 pub(crate) fn count_all_tokens(
     model: String,
     system: Option<Vec<SystemMessage>>,
@@ -130,7 +156,7 @@ pub(crate) fn count_all_tokens(
         }
     }
 
-    // 本地计算
+    // 本地计算（使用 Claude tokenizer 或简单估算）
     count_all_tokens_local(system, messages, tools)
 }
 
@@ -147,7 +173,7 @@ async fn call_remote_count_tokens(
 
     // 构建请求体
     let request = CountTokensRequest {
-        model: model, // 模型名称用于 token 计算
+        model,
         messages: messages.clone(),
         system: system.clone(),
         tools: tools.clone(),
@@ -193,10 +219,15 @@ fn count_all_tokens_local(
         for msg in system {
             total += count_tokens(&msg.text);
         }
+        // 系统消息额外开销
+        total += 10;
     }
 
     // 用户消息
     for msg in &messages {
+        // 每条消息的结构开销
+        total += 4;
+
         if let serde_json::Value::String(s) = &msg.content {
             total += count_tokens(s);
         } else if let serde_json::Value::Array(arr) = &msg.content {
@@ -215,6 +246,8 @@ fn count_all_tokens_local(
             total += count_tokens(&tool.description);
             let input_schema_json = serde_json::to_string(&tool.input_schema).unwrap_or_default();
             total += count_tokens(&input_schema_json);
+            // 每个工具的结构开销
+            total += 10;
         }
     }
 
@@ -235,8 +268,45 @@ pub(crate) fn estimate_output_tokens(content: &[serde_json::Value]) -> i32 {
                 let input_str = serde_json::to_string(input).unwrap_or_default();
                 total += count_tokens(&input_str) as i32;
             }
+            total += 10; // 工具调用结构开销
         }
     }
 
     total.max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_count_tokens_english() {
+        let text = "Hello, world!";
+        let count = count_tokens(text);
+        // 应该在 3-5 个 token 之间
+        assert!(count >= 3 && count <= 5, "English text token count: {}", count);
+    }
+
+    #[test]
+    fn test_count_tokens_chinese() {
+        let text = "你好，世界！";
+        let count = count_tokens(text);
+        // 中文应该在 5-8 个 token 之间
+        assert!(count >= 5 && count <= 8, "Chinese text token count: {}", count);
+    }
+
+    #[test]
+    fn test_count_tokens_mixed() {
+        let text = "Hello 你好 world 世界";
+        let count = count_tokens(text);
+        // 混合文本应该在 8-15 个 token 之间
+        assert!(count >= 8 && count <= 15, "Mixed text token count: {}", count);
+    }
+
+    #[test]
+    fn test_count_tokens_empty() {
+        let text = "";
+        let count = count_tokens(text);
+        assert_eq!(count, 0, "Empty text should have 0 tokens");
+    }
 }
