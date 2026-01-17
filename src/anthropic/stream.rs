@@ -417,6 +417,13 @@ impl SseStateManager {
         // 发送 message_delta
         if !self.message_delta_sent {
             self.message_delta_sent = true;
+
+            tracing::info!(
+                "发送 message_delta 事件 - input_tokens: {}, output_tokens: {}",
+                input_tokens,
+                output_tokens
+            );
+
             events.push(SseEvent::new(
                 "message_delta",
                 json!({

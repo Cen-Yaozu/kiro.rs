@@ -219,6 +219,13 @@ async fn handle_stream_request(
     input_tokens: i32,
     thinking_enabled: bool,
 ) -> Response {
+    tracing::info!(
+        "开始处理流式请求 - model: {}, input_tokens: {}, thinking: {}",
+        model,
+        input_tokens,
+        thinking_enabled
+    );
+
     // 调用 Kiro API（支持多凭据故障转移）
     let stream_response = match provider.call_api_stream(request_body).await {
         Ok(resp) => resp,
@@ -515,6 +522,13 @@ async fn handle_non_stream_request(
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
     let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
 
+    tracing::info!(
+        "构建非流式响应 - input_tokens: {}, output_tokens: {}, context_input_tokens: {:?}",
+        final_input_tokens,
+        output_tokens,
+        context_input_tokens
+    );
+
     // 构建 Anthropic 响应
     let response_body = json!({
         "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
@@ -529,6 +543,8 @@ async fn handle_non_stream_request(
             "output_tokens": output_tokens
         }
     });
+
+    tracing::debug!("响应 usage 字段: {{ input_tokens: {}, output_tokens: {} }}", final_input_tokens, output_tokens);
 
     (StatusCode::OK, Json(response_body)).into_response()
 }

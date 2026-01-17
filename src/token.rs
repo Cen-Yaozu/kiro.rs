@@ -217,25 +217,40 @@ fn count_all_tokens_local(
     // 系统消息
     if let Some(ref system) = system {
         for msg in system {
-            total += count_tokens(&msg.text);
+            let tokens = count_tokens(&msg.text);
+            total += tokens;
+            tracing::debug!("系统消息 tokens: {}", tokens);
         }
         // 系统消息额外开销
         total += 10;
     }
 
     // 用户消息
-    for msg in &messages {
+    tracing::debug!("开始计算 {} 条消息的 tokens", messages.len());
+    for (idx, msg) in messages.iter().enumerate() {
         // 每条消息的结构开销
         total += 4;
 
-        if let serde_json::Value::String(s) = &msg.content {
-            total += count_tokens(s);
+        let msg_tokens = if let serde_json::Value::String(s) = &msg.content {
+            count_tokens(s)
         } else if let serde_json::Value::Array(arr) = &msg.content {
+            let mut content_tokens = 0;
             for item in arr {
                 if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                    total += count_tokens(text);
+                    content_tokens += count_tokens(text);
                 }
             }
+            content_tokens
+        } else {
+            0
+        };
+
+        total += msg_tokens;
+
+        if idx < 5 || idx >= messages.len() - 5 {
+            tracing::debug!("消息 #{} ({}) tokens: {}", idx + 1, msg.role, msg_tokens);
+        } else if idx == 5 {
+            tracing::debug!("... 省略中间消息 ...");
         }
     }
 
@@ -249,7 +264,16 @@ fn count_all_tokens_local(
             // 每个工具的结构开销
             total += 10;
         }
+        tracing::debug!("工具定义 tokens: {} 个工具", tools.len());
     }
+
+    tracing::info!(
+        "Token 计数完成 - 总计: {} tokens (消息: {}, 系统: {}, 工具: {})",
+        total,
+        messages.len(),
+        system.as_ref().map(|s| s.len()).unwrap_or(0),
+        tools.as_ref().map(|t| t.len()).unwrap_or(0)
+    );
 
     total.max(1)
 }
@@ -260,17 +284,23 @@ pub(crate) fn estimate_output_tokens(content: &[serde_json::Value]) -> i32 {
 
     for block in content {
         if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-            total += count_tokens(text) as i32;
+            let tokens = count_tokens(text) as i32;
+            total += tokens;
+            tracing::debug!("文本块 tokens: {}", tokens);
         }
         if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
             // 工具调用开销
             if let Some(input) = block.get("input") {
                 let input_str = serde_json::to_string(input).unwrap_or_default();
-                total += count_tokens(&input_str) as i32;
+                let tokens = count_tokens(&input_str) as i32;
+                total += tokens;
+                tracing::debug!("工具调用 tokens: {}", tokens);
             }
             total += 10; // 工具调用结构开销
         }
     }
+
+    tracing::info!("输出 tokens 估算: {} tokens ({} 个内容块)", total.max(1), content.len());
 
     total.max(1)
 }
