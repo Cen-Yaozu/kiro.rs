@@ -145,7 +145,22 @@ pub async fn post_messages(
     };
 
     let request_body = match serde_json::to_string(&kiro_request) {
-        Ok(body) => body,
+        Ok(body) => {
+            let body_size = body.len();
+            let body_size_kb = body_size as f64 / 1024.0;
+            tracing::info!(
+                "Kiro 请求体大小: {} bytes ({:.2} KB)",
+                body_size,
+                body_size_kb
+            );
+            if body_size > 1_000_000 {
+                tracing::warn!(
+                    "⚠️  请求体过大: {:.2} MB，可能超过 Kiro API 限制",
+                    body_size as f64 / 1024.0 / 1024.0
+                );
+            }
+            body
+        }
         Err(e) => {
             tracing::error!("序列化请求失败: {}", e);
             return (
