@@ -13,6 +13,7 @@ RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
+COPY tokenizers ./tokenizers
 COPY --from=frontend-builder /app/admin-ui/dist /app/admin-ui/dist
 
 RUN cargo build --release
@@ -23,6 +24,7 @@ RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 COPY --from=builder /app/target/release/kiro-rs /app/kiro-rs
+COPY --from=builder /app/tokenizers /app/tokenizers
 
 VOLUME ["/app/config"]
 
