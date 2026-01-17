@@ -17,18 +17,18 @@ use super::types::{ContentBlock, MessagesRequest, Thinking};
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
 ///
 /// 映射规则：
-/// - 所有 sonnet → claude-sonnet-4-5-20250929
-/// - 所有 opus → claude-opus-4-5-20251101
-/// - 所有 haiku → claude-haiku-4-5-20251001
+/// - 所有 sonnet → claude-sonnet-4.5
+/// - 所有 opus → claude-opus-4.5
+/// - 所有 haiku → claude-haiku-4.5
 pub fn map_model(model: &str) -> Option<String> {
     let model_lower = model.to_lowercase();
 
     if model_lower.contains("sonnet") {
-        Some("claude-sonnet-4-5-20250929".to_string())
+        Some("claude-sonnet-4.5".to_string())
     } else if model_lower.contains("opus") {
-        Some("claude-opus-4-5-20251101".to_string())
+        Some("claude-opus-4.5".to_string())
     } else if model_lower.contains("haiku") {
-        Some("claude-haiku-4-5-20251001".to_string())
+        Some("claude-haiku-4.5".to_string())
     } else {
         None
     }
