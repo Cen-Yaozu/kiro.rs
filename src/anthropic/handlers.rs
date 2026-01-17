@@ -148,17 +148,70 @@ pub async fn post_messages(
         Ok(body) => {
             let body_size = body.len();
             let body_size_kb = body_size as f64 / 1024.0;
+
+            // 分析请求体内容组成
+            let message_count = payload.messages.len();
+            let system_size = payload.system.as_ref()
+                .map(|s| serde_json::to_string(s).unwrap_or_default().len())
+                .unwrap_or(0);
+            let tools_size = payload.tools.as_ref()
+                .map(|t| serde_json::to_string(t).unwrap_or_default().len())
+                .unwrap_or(0);
+
+            // 计算消息内容的平均大小
+            let avg_message_size = if message_count > 0 {
+                body_size / message_count
+            } else {
+                0
+            };
+
             tracing::info!(
-                "Kiro 请求体大小: {} bytes ({:.2} KB)",
+                "📊 请求体分析 - 总大小: {} bytes ({:.2} KB), 消息数: {}, 平均每条: {} bytes, system: {} bytes, tools: {} bytes",
                 body_size,
-                body_size_kb
+                body_size_kb,
+                message_count,
+                avg_message_size,
+                system_size,
+                tools_size
             );
-            if body_size > 1_000_000 {
+
+            // 警告阈值检查
+            if body_size > 2_000_000 {
+                tracing::error!(
+                    "❌ 请求体过大: {:.2} MB，超过 Kiro API 可能的限制（~2MB）",
+                    body_size as f64 / 1024.0 / 1024.0
+                );
+
+                // 分析消息大小分布
+                if message_count > 0 {
+                    let mut message_sizes: Vec<(usize, usize)> = payload.messages.iter()
+                        .enumerate()
+                        .map(|(idx, msg)| {
+                            let size = serde_json::to_string(msg).unwrap_or_default().len();
+                            (idx, size)
+                        })
+                        .collect();
+
+                    // 按大小排序，找出最大的几条消息
+                    message_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+
+                    tracing::error!("📋 最大的 5 条消息:");
+                    for (idx, size) in message_sizes.iter().take(5) {
+                        tracing::error!("  消息 #{}: {:.2} KB", idx + 1, *size as f64 / 1024.0);
+                    }
+                }
+            } else if body_size > 1_500_000 {
                 tracing::warn!(
-                    "⚠️  请求体过大: {:.2} MB，可能超过 Kiro API 限制",
+                    "⚠️  请求体接近限制: {:.2} MB，建议使用 /compact 压缩上下文",
+                    body_size as f64 / 1024.0 / 1024.0
+                );
+            } else if body_size > 1_000_000 {
+                tracing::warn!(
+                    "⚠️  请求体较大: {:.2} MB",
                     body_size as f64 / 1024.0 / 1024.0
                 );
             }
+
             body
         }
         Err(e) => {
