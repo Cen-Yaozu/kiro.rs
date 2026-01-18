@@ -19,6 +19,7 @@
 mod converter;
 mod handlers;
 mod middleware;
+mod model_config;
 mod router;
 mod stream;
 pub mod types;

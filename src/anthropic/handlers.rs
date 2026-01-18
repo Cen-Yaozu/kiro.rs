@@ -243,6 +243,35 @@ pub async fn post_messages(
         input_tokens
     );
 
+    // 获取模型的context window大小
+    let context_window_size = super::model_config::get_context_window_size(&payload.model);
+
+    // 提前检查：input_tokens + max_tokens 是否超过context window
+    let total_tokens = input_tokens + payload.max_tokens;
+    if total_tokens > context_window_size {
+        tracing::warn!(
+            "请求被拦截: input_tokens({}) + max_tokens({}) = {} > context_window({})",
+            input_tokens,
+            payload.max_tokens,
+            total_tokens,
+            context_window_size
+        );
+
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "invalid_request_error",
+                format!(
+                    "input length and max_tokens exceed context limit: {} + {} > {}, decrease input length or max_tokens and try again. Suggestion: 1) Use /compact command to reduce context 2) Reduce conversation history 3) Decrease max_tokens parameter",
+                    input_tokens,
+                    payload.max_tokens,
+                    context_window_size
+                ),
+            )),
+        )
+            .into_response();
+    }
+
     // 检查是否启用了thinking
     let thinking_enabled = payload
         .thinking
@@ -279,6 +308,28 @@ fn determine_error_status(error_msg: &str) -> (StatusCode, &'static str) {
     }
 }
 
+/// 检查错误信息是否为token超限错误
+fn is_token_limit_error(error_msg: &str) -> bool {
+    error_msg.contains("Input is too long")
+        || error_msg.contains("too long")
+        || error_msg.contains("exceeds")
+        || error_msg.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD")
+        || error_msg.contains("context limit")
+}
+
+/// 生成友好的token超限错误信息
+fn create_token_limit_error(input_tokens: i32, max_tokens: i32, context_window: i32) -> ErrorResponse {
+    ErrorResponse::new(
+        "invalid_request_error",
+        format!(
+            "Prompt is too long (server-side context limit reached). Input tokens: {}, Max tokens: {}, Context window: {}. Suggestion: 1) Use /compact command to reduce context 2) Reduce conversation history 3) Decrease max_tokens parameter",
+            input_tokens,
+            max_tokens,
+            context_window
+        ),
+    )
+}
+
 /// 处理流式请求
 async fn handle_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
@@ -300,6 +351,19 @@ async fn handle_stream_request(
         Err(e) => {
             let error_msg = e.to_string();
             tracing::error!("Kiro API 调用失败: {}", error_msg);
+
+            // 检查是否为token超限错误
+            if is_token_limit_error(&error_msg) {
+                let context_window = super::model_config::get_context_window_size(model);
+                // 从request_body解析max_tokens（简化处理，使用默认值）
+                let max_tokens = 8192; // 默认值，实际应该从payload获取
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(create_token_limit_error(input_tokens, max_tokens, context_window)),
+                )
+                    .into_response();
+            }
+
             let (status, error_type) = determine_error_status(&error_msg);
             return (
                 status,
@@ -441,9 +505,6 @@ fn create_sse_stream(
     initial_stream.chain(processing_stream)
 }
 
-/// 上下文窗口大小（200k tokens）
-const CONTEXT_WINDOW_SIZE: i32 = 200_000;
-
 /// 处理非流式请求
 async fn handle_non_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
@@ -457,6 +518,18 @@ async fn handle_non_stream_request(
         Err(e) => {
             let error_msg = e.to_string();
             tracing::error!("Kiro API 调用失败: {}", error_msg);
+
+            // 检查是否为token超限错误
+            if is_token_limit_error(&error_msg) {
+                let context_window = super::model_config::get_context_window_size(model);
+                let max_tokens = 8192; // 默认值
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(create_token_limit_error(input_tokens, max_tokens, context_window)),
+                )
+                    .into_response();
+            }
+
             let (status, error_type) = determine_error_status(&error_msg);
             return (
                 status,
@@ -540,9 +613,10 @@ async fn handle_non_stream_request(
                         }
                         Event::ContextUsage(context_usage) => {
                             // 从上下文使用百分比计算实际的 input_tokens
-                            // 公式: percentage * 200000 / 100 = percentage * 2000
+                            // 获取模型的context window大小
+                            let context_window_size = super::model_config::get_context_window_size(model);
                             let actual_input_tokens = (context_usage.context_usage_percentage
-                                * (CONTEXT_WINDOW_SIZE as f64)
+                                * (context_window_size as f64)
                                 / 100.0)
                                 as i32;
                             context_input_tokens = Some(actual_input_tokens);
