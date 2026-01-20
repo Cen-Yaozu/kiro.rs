@@ -620,10 +620,11 @@ async fn handle_non_stream_request(
                                 / 100.0)
                                 as i32;
                             context_input_tokens = Some(actual_input_tokens);
-                            tracing::debug!(
-                                "收到 contextUsageEvent: {}%, 计算 input_tokens: {}",
+                            tracing::info!(
+                                "📊 收到 contextUsageEvent - 百分比: {:.2}%, 计算得出 input_tokens: {} (累积值), context_window: {}",
                                 context_usage.context_usage_percentage,
-                                actual_input_tokens
+                                actual_input_tokens,
+                                context_window_size
                             );
                         }
                         Event::Exception { exception_type, .. } => {

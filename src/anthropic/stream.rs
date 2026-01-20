@@ -577,14 +577,16 @@ impl StreamContext {
             Event::ContextUsage(context_usage) => {
                 // 从上下文使用百分比计算实际的 input_tokens
                 // 公式: percentage * 200000 / 100 = percentage * 2000
+                // 注意：context_usage_percentage 是上游返回的累积上下文使用百分比
                 let actual_input_tokens = (context_usage.context_usage_percentage
                     * (CONTEXT_WINDOW_SIZE as f64)
                     / 100.0) as i32;
                 self.context_input_tokens = Some(actual_input_tokens);
-                tracing::debug!(
-                    "收到 contextUsageEvent: {}%, 计算 input_tokens: {}",
+                tracing::info!(
+                    "📊 收到 contextUsageEvent - 百分比: {:.2}%, 计算得出 input_tokens: {} (累积值), context_window: {}",
                     context_usage.context_usage_percentage,
-                    actual_input_tokens
+                    actual_input_tokens,
+                    CONTEXT_WINDOW_SIZE
                 );
                 Vec::new()
             }
