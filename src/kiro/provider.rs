@@ -50,7 +50,7 @@ impl KiroProvider {
 
     /// 创建带代理配置的 KiroProvider 实例
     pub fn with_proxy(token_manager: Arc<MultiTokenManager>, proxy: Option<ProxyConfig>) -> Self {
-        let client = build_client(proxy.as_ref(), 720) // 12 分钟超时
+        let client = build_client(proxy.as_ref(), 720, token_manager.config().tls_backend)
             .expect("创建 HTTP 客户端失败");
 
         Self {
@@ -161,22 +161,13 @@ impl KiroProvider {
         let mut headers = HeaderMap::new();
 
         // 按照严格顺序添加请求头
-        headers.insert(
-            "content-type",
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
         headers.insert(
             "x-amz-user-agent",
             HeaderValue::from_str(&x_amz_user_agent).unwrap(),
         );
-        headers.insert(
-            "user-agent",
-            HeaderValue::from_str(&user_agent).unwrap(),
-        );
-        headers.insert(
-            "host",
-            HeaderValue::from_str(&self.base_domain()).unwrap(),
-        );
+        headers.insert("user-agent", HeaderValue::from_str(&user_agent).unwrap());
+        headers.insert("host", HeaderValue::from_str(&self.base_domain()).unwrap());
         headers.insert(
             "amz-sdk-invocation-id",
             HeaderValue::from_str(&Uuid::new_v4().to_string()).unwrap(),
@@ -468,7 +459,12 @@ impl KiroProvider {
                     );
                 }
 
-                last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
+                last_error = Some(anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                ));
                 continue;
             }
 
@@ -497,7 +493,12 @@ impl KiroProvider {
                     );
                 }
 
-                last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
+                last_error = Some(anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                ));
                 continue;
             }
 
@@ -511,7 +512,12 @@ impl KiroProvider {
                     status,
                     body
                 );
-                last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
+                last_error = Some(anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                ));
                 if attempt + 1 < max_retries {
                     sleep(Self::retry_delay(attempt)).await;
                 }
@@ -531,7 +537,12 @@ impl KiroProvider {
                 status,
                 body
             );
-            last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
+            last_error = Some(anyhow::anyhow!(
+                "{} API 请求失败: {} {}",
+                api_type,
+                status,
+                body
+            ));
             if attempt + 1 < max_retries {
                 sleep(Self::retry_delay(attempt)).await;
             }

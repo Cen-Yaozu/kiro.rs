@@ -15,6 +15,7 @@
 # 敏感配置备份
 /configs_backup_*/
 /docker-config/
+/credentials.*
 
 # Docker
 /docker-compose.yml
