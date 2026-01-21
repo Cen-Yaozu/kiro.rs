@@ -49,14 +49,14 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            TAG="${{ github.event.inputs.version }}"
           elif [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "tag=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            TAG="${GITHUB_REF#refs/tags/v}"
           else
-            VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-            echo "tag=$VERSION" >> $GITHUB_OUTPUT
+            TAG=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           fi
-          echo "Version tag: $(cat $GITHUB_OUTPUT | grep tag | cut -d= -f2)"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using version tag: $TAG"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -87,14 +87,14 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            TAG="${{ github.event.inputs.version }}"
           elif [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "tag=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            TAG="${GITHUB_REF#refs/tags/v}"
           else
-            VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-            echo "tag=$VERSION" >> $GITHUB_OUTPUT
+            TAG=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           fi
-          echo "Version tag: $(cat $GITHUB_OUTPUT | grep tag | cut -d= -f2)"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using version tag: $TAG"
 
       - name: Create and push manifest
         run: |

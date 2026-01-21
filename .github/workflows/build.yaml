@@ -49,14 +49,14 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            VERSION="${{ github.event.inputs.version }}"
           elif [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            VERSION="${GITHUB_REF#refs/tags/v}"
           else
             VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
           fi
-          echo "Version: $(cat $GITHUB_OUTPUT | grep version | cut -d= -f2)"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Using version: $VERSION"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
