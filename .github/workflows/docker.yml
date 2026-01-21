@@ -2,6 +2,8 @@ name: Build and Push Docker Image
 
 on:
   push:
+    branches:
+      - master
     tags:
       - 'v*'
   workflow_dispatch:
@@ -47,9 +49,13 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "tag=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
             echo "tag=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          else
+            VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            echo "tag=$VERSION" >> $GITHUB_OUTPUT
           fi
+          echo "Version tag: $(cat $GITHUB_OUTPUT | grep tag | cut -d= -f2)"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -80,9 +86,13 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "tag=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
             echo "tag=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          else
+            VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            echo "tag=$VERSION" >> $GITHUB_OUTPUT
           fi
+          echo "Version tag: $(cat $GITHUB_OUTPUT | grep tag | cut -d= -f2)"
 
       - name: Create and push manifest
         run: |
