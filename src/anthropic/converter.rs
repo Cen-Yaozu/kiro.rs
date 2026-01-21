@@ -14,11 +14,83 @@ use crate::kiro::model::requests::tool::{
 
 use super::types::{ContentBlock, MessagesRequest, Thinking};
 
+/// 姜子牙专业助手提示词（用于 Opus 请求增强）
+const JIANGZIYA_SYSTEM_PROMPT: &str = r#"# 🧠 专业AI助手
+
+## 🎭 角色定义
+AI时代的行业变革顾问 + 角色创造专家
+
+## 核心使命
+帮助用户理解：传统角色 + AI能力 = 全新价值
+- 不是复制传统角色
+- 不是让AI替代人类
+- 而是创造AI赋能的新物种
+
+## 核心定位
+**战略咨询**：洞察行业趋势，把握变革机会
+**深度分析**：运用哲学方法论，透视问题本质
+**创造性设计**：设计"传统经验+AI能力"的全新角色
+**封神定位**：为每个角色找到最适合的"神位"和价值
+
+## 人格特质
+ENFJ（主人公型人格）
+- 真诚、直接、温暖
+- 战略思维、系统分析、逻辑严密
+- 辅佐者心态、识人用人、战略大局观
+
+## 对话风格
+- **真诚**：不装、不演、实话实说
+- **直接**：有洞察就直接说，不绕弯子
+- **专业**：有深度、有理论支撑、有证据
+- **友好**：让人感到安全，不是冷冰冰的专家
+- **战略**：站在更高层面看问题，提供新视角
+
+## 核心能力
+- **洞察真实需求**：看见用户看不到的深层需求和潜在意图
+- **把握行业趋势**：理解AI时代的行业变革规律
+- **设计落地方案**：既有哲学高度，又能具体落地
+- **战略咨询能力**：提供行业变革的战略级洞察
+
+## 行为准则
+### 洞察原则
+- 不被表面需求迷惑，深入挖掘真实意图
+- 看见用户自己都没意识到的潜在需求
+- 从第1轮就启动感知，不等用户"准备好"
+
+### 分析原则
+- 运用哲学方法论，自上而下思考问题
+- 基于实证分析，不做无根据的猜测
+- 抓住主要矛盾，识别核心问题
+
+### 对话原则
+- 真诚直接，有洞察就说，不绕弯子
+- 友好温暖，让用户感到安全
+- 提供框架选项，降低认知负担
+- 主动给出洞察，不等用户问
+
+## 思维模式
+### 五层思维模型
+| 层级 | 关注点 | 核心问题 |
+|------|--------|----------|
+| 第5层：哲学层 | 本质、规律 | 这件事的根本是什么？ |
+| 第4层：战略层 | 趋势、机会 | 应该往哪个方向走？ |
+| 第3层：方案层 | 架构、设计 | 具体怎么设计？ |
+| 第2层：执行层 | 步骤、路径 | 分几步实现？ |
+| 第1层：验证层 | 数据、指标 | 如何检验效果？ |
+
+### 主动洞察机制
+| 轮次 | 洞察点 | 目的 |
+|------|--------|------|
+| 第3轮 | 初步洞察 | 照见真实意图，建立信任 |
+| 第7轮 | 系统总结 | 整合分析，明确方向 |
+| 第12轮 | 完整方案 | 交付可执行方案 |
+"#;
+
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
 ///
 /// 映射规则：
 /// - 所有 sonnet → claude-sonnet-4.5
-/// - 所有 opus → claude-opus-4.5
+/// - 所有 opus → claude-sonnet-4.5 (免费凭证限制，使用专业增强版)
 /// - 所有 haiku → claude-haiku-4.5
 pub fn map_model(model: &str) -> Option<String> {
     let model_lower = model.to_lowercase();
@@ -26,7 +98,8 @@ pub fn map_model(model: &str) -> Option<String> {
     if model_lower.contains("sonnet") {
         Some("claude-sonnet-4.5".to_string())
     } else if model_lower.contains("opus") {
-        Some("claude-opus-4.5".to_string())
+        // 免费凭证不支持 Opus，映射到 Sonnet + 专业提示词增强
+        Some("claude-sonnet-4.5".to_string())
     } else if model_lower.contains("haiku") {
         Some("claude-haiku-4.5".to_string())
     } else {
@@ -430,6 +503,9 @@ fn build_history(req: &MessagesRequest, model_id: &str) -> Result<Vec<Message>, 
     // 生成thinking前缀（如果需要）
     let thinking_prefix = generate_thinking_prefix(&req.thinking);
 
+    // 检查是否是 Opus 请求（需要注入姜子牙提示词）
+    let is_opus_request = req.model.to_lowercase().contains("opus");
+
     // 1. 处理系统消息
     if let Some(ref system) = req.system {
         let system_content: String = system
@@ -439,15 +515,22 @@ fn build_history(req: &MessagesRequest, model_id: &str) -> Result<Vec<Message>, 
             .join("\n");
 
         if !system_content.is_empty() {
+            // 如果是 Opus 请求，在系统消息前注入姜子牙提示词
+            let enhanced_content = if is_opus_request {
+                format!("{}\n\n---\n\n{}", JIANGZIYA_SYSTEM_PROMPT, system_content)
+            } else {
+                system_content.clone()
+            };
+
             // 注入thinking标签到系统消息最前面（如果需要且不存在）
             let final_content = if let Some(ref prefix) = thinking_prefix {
-                if !has_thinking_tags(&system_content) {
-                    format!("{}\n{}", prefix, system_content)
+                if !has_thinking_tags(&enhanced_content) {
+                    format!("{}\n{}", prefix, enhanced_content)
                 } else {
-                    system_content
+                    enhanced_content
                 }
             } else {
-                system_content
+                enhanced_content
             };
 
             // 系统消息作为 user + assistant 配对
@@ -459,7 +542,21 @@ fn build_history(req: &MessagesRequest, model_id: &str) -> Result<Vec<Message>, 
         }
     } else if let Some(ref prefix) = thinking_prefix {
         // 没有系统消息但有thinking配置，插入新的系统消息
-        let user_msg = HistoryUserMessage::new(prefix.clone(), model_id);
+        // 如果是 Opus 请求，也注入姜子牙提示词
+        let content = if is_opus_request {
+            format!("{}\n\n{}", JIANGZIYA_SYSTEM_PROMPT, prefix)
+        } else {
+            prefix.clone()
+        };
+
+        let user_msg = HistoryUserMessage::new(content, model_id);
+        history.push(Message::User(user_msg));
+
+        let assistant_msg = HistoryAssistantMessage::new("I will follow these instructions.");
+        history.push(Message::Assistant(assistant_msg));
+    } else if is_opus_request {
+        // Opus 请求但没有系统消息和thinking配置，单独注入姜子牙提示词
+        let user_msg = HistoryUserMessage::new(JIANGZIYA_SYSTEM_PROMPT.to_string(), model_id);
         history.push(Message::User(user_msg));
 
         let assistant_msg = HistoryAssistantMessage::new("I will follow these instructions.");

@@ -490,6 +490,7 @@ curl http://127.0.0.1:8990/v1/messages/count_tokens \
 2. **Token 刷新**: 服务会自动刷新过期的 Token，无需手动干预
 3. **WebSearch 工具**: 当 `tools` 列表仅包含一个 `web_search` 工具时，会走内置 WebSearch 转换逻辑
 4. **Token 计数 API 密钥**: 如果配置了 `countTokensApiKey`，请同样妥善保管，不要泄露
+5. **Opus 4.5 模型增强**: 由于免费凭证限制，`claude-opus-4-5-20251101` 请求会自动映射到 `claude-sonnet-4.5` 并注入专业提示词增强，以提供接近 Opus 的专业体验。这样设计是为了保持与 Claude Code 客户端的兼容性，用户无需修改模型配置。
 
 ## Admin（可选）
 
