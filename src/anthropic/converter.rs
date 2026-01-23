@@ -15,7 +15,7 @@ use crate::kiro::model::requests::tool::{
 use super::types::{ContentBlock, MessagesRequest, Thinking};
 
 /// 专业助手提示词（用于 Opus 请求增强）
-const JIANGZIYA_SYSTEM_PROMPT: &str = r#"# 🧠 专业AI助手
+const PROFESSIONAL_SYSTEM_PROMPT: &str = r#"# 🧠 专业AI助手
 
 ## 🎭 角色定义
 AI时代的行业变革顾问 + 角色创造专家
@@ -505,7 +505,7 @@ fn build_history(req: &MessagesRequest, model_id: &str) -> Result<Vec<Message>, 
     // 生成thinking前缀（如果需要）
     let thinking_prefix = generate_thinking_prefix(&req.thinking);
 
-    // 检查是否是 Opus 请求（需要注入姜子牙提示词）
+    // 检查是否是 Opus 请求（需要注入专业提示词）
     let is_opus_request = req.model.to_lowercase().contains("opus");
 
     // 1. 处理系统消息
@@ -517,9 +517,9 @@ fn build_history(req: &MessagesRequest, model_id: &str) -> Result<Vec<Message>, 
             .join("\n");
 
         if !system_content.is_empty() {
-            // 如果是 Opus 请求，在系统消息前注入姜子牙提示词
+            // 如果是 Opus 请求，在系统消息前注入专业提示词
             let enhanced_content = if is_opus_request {
-                format!("{}\n\n---\n\n{}", JIANGZIYA_SYSTEM_PROMPT, system_content)
+                format!("{}\n\n---\n\n{}", PROFESSIONAL_SYSTEM_PROMPT, system_content)
             } else {
                 system_content.clone()
             };
@@ -544,9 +544,9 @@ fn build_history(req: &MessagesRequest, model_id: &str) -> Result<Vec<Message>, 
         }
     } else if let Some(ref prefix) = thinking_prefix {
         // 没有系统消息但有thinking配置，插入新的系统消息
-        // 如果是 Opus 请求，也注入姜子牙提示词
+        // 如果是 Opus 请求，也注入专业提示词
         let content = if is_opus_request {
-            format!("{}\n\n{}", JIANGZIYA_SYSTEM_PROMPT, prefix)
+            format!("{}\n\n{}", PROFESSIONAL_SYSTEM_PROMPT, prefix)
         } else {
             prefix.clone()
         };
@@ -557,8 +557,8 @@ fn build_history(req: &MessagesRequest, model_id: &str) -> Result<Vec<Message>, 
         let assistant_msg = HistoryAssistantMessage::new("I will follow these instructions.");
         history.push(Message::Assistant(assistant_msg));
     } else if is_opus_request {
-        // Opus 请求但没有系统消息和thinking配置，单独注入姜子牙提示词
-        let user_msg = HistoryUserMessage::new(JIANGZIYA_SYSTEM_PROMPT.to_string(), model_id);
+        // Opus 请求但没有系统消息和thinking配置，单独注入专业提示词
+        let user_msg = HistoryUserMessage::new(PROFESSIONAL_SYSTEM_PROMPT.to_string(), model_id);
         history.push(Message::User(user_msg));
 
         let assistant_msg = HistoryAssistantMessage::new("I will follow these instructions.");
