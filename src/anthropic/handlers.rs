@@ -869,8 +869,12 @@ async fn handle_stream_request_buffered(
     // 创建缓冲流处理上下文
     let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled);
 
+    // 解构 StreamResponse，保持 guard 的生命周期
+    let stream_response = response.response;
+    let _guard = response.guard;
+
     // 创建缓冲 SSE 流
-    let stream = create_buffered_sse_stream(response, ctx);
+    let stream = create_buffered_sse_stream(stream_response, ctx);
 
     // 返回 SSE 响应
     Response::builder()
